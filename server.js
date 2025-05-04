@@ -1,61 +1,94 @@
 const express = require('express');
 const cors = require('cors');
+const { SMTPClient } = require('smtp-client');
+const dns = require('dns');
 const { Pool } = require('pg');
 
 const app = express();
 const port = process.env.PORT || 3000;
 
+// PostgreSQL setup using Render credentials
+const pool = new Pool({
+  user: 'email_verification_db_nvnq_user',
+  host: 'dpg-d0bhoo95pdvs73cmehlg-a.oregon-postgres.render.com',
+  database: 'email_verification_db_nvnq',
+  password: 'FfOsLEvGszsqxcvvu8eV84FK6GRP41kO',
+  port: 5432,
+  ssl: {
+    rejectUnauthorized: false
+  }
+});
+
 app.use(cors());
 app.use(express.json());
 
-// 🔁 PostgreSQL setup using Render credentials
-const pool = new Pool
-({
-  user: 'your_render_user',         // Replace
-  host: 'your_render_host',         // Replace
-  database: 'your_render_db_name',  // Replace
-  password: 'your_render_password', // Replace
-  port: 5432,
-});
+// Get MX records
+function getMXRecords(domain) {
+  return new Promise((resolve, reject) => {
+    dns.resolveMx(domain, (err, addresses) => {
+      if (err) reject('Error resolving MX records');
+      else resolve(addresses);
+    });
+  });
+}
 
-// 🧱 Create table if not exists
-pool.query(`
-  CREATE TABLE IF NOT EXISTS verification_history (
-    id SERIAL PRIMARY KEY,
-    email TEXT NOT NULL,
-    is_valid BOOLEAN,
-    error_message TEXT,
-    verified_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-  );
-`);
-
-app.post('/verify-emails', async (req, res) => {
-  const emails = req.body.emails;
-
-  const results = await Promise.all(emails.map(async (email) => {
-    let isValid = false;
-    let errorMessage = '';
-
-    // Dummy validation logic (replace with SMTP logic later)
-    if (email.includes('@')) {
-      isValid = true;
-      errorMessage = 'Valid email address';
-    } else {
-      errorMessage = 'Invalid email format';
+// Verify a single email
+async function verifyEmail(email) {
+  const domain = email.split('@')[1];
+  try {
+    const mxRecords = await getMXRecords(domain);
+    if (mxRecords.length === 0) {
+      return { email, isValid: false, errorMessage: 'No MX records found' };
     }
 
-    // Save to PostgreSQL
-    await pool.query(
-      `INSERT INTO verification_history (email, is_valid, error_message) VALUES ($1, $2, $3)`,
-      [email, isValid, errorMessage]
-    );
+    const mailServer = mxRecords[0].exchange;
+    const client = new SMTPClient({ host: mailServer, port: 25, secure: false });
 
-    return { email, isValid, errorMessage };
-  }));
+    await client.connect();
+    await client.greet();
+    await client.mail({ from: 'test@example.com' });
+
+    let response;
+    try {
+      response = await client.rcpt({ to: email });
+
+      if (response.code >= 400 && response.code < 500) {
+        return { email, isValid: false, errorMessage: 'Soft bounce: ' + response.message };
+      } else if (response.code >= 500) {
+        return { email, isValid: false, errorMessage: 'Hard bounce: ' + response.message };
+      }
+    } catch (err) {
+      return { email, isValid: false, errorMessage: 'RCPT TO failed: ' + err.message };
+    }
+
+    await client.quit();
+    return { email, isValid: true, errorMessage: 'Valid email address' };
+  } catch (err) {
+    return { email, isValid: false, errorMessage: 'SMTP failed: ' + err.message };
+  }
+}
+
+// Route to verify emails
+app.post('/verify-emails', async (req, res) => {
+  const emails = req.body.emails || [];
+  const results = await Promise.all(emails.map(verifyEmail));
+
+  // Insert into PostgreSQL
+  for (const r of results) {
+    await pool.query(
+      'INSERT INTO verification_history (email, status, error_message, verified_at) VALUES ($1, $2, $3, NOW()) ON CONFLICT (email) DO UPDATE SET status = $2, error_message = $3, verified_at = NOW()',
+      [r.email, r.isValid ? 'Valid' : 'Invalid', r.errorMessage]
+    );
+  }
 
   res.json(results);
 });
 
+// Health check
+app.get('/', (req, res) => {
+  res.send('Email Verifier Backend Running ✅');
+});
+
 app.listen(port, () => {
-  console.log(`🚀 Backend running at http://localhost:${port}`);
+  console.log(`✅ Server is running on port ${port}`);
 });
