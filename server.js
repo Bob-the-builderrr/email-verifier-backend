@@ -9,7 +9,8 @@ app.use(cors());
 app.use(express.json());
 
 // 🔁 PostgreSQL setup using Render credentials
-const pool = new Pool({
+const pool = new Pool
+({
   user: 'your_render_user',         // Replace
   host: 'your_render_host',         // Replace
   database: 'your_render_db_name',  // Replace
