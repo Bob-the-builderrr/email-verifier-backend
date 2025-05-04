@@ -1,93 +1,56 @@
 const express = require('express');
 const cors = require('cors');
-const { SMTPClient } = require('smtp-client');
-const dns = require('dns');
 const { Pool } = require('pg');
 
 const app = express();
-const port = 3000;
+const port = process.env.PORT || 3000;
 
-// PostgreSQL setup
-const pool = new Pool({
-  user: 'postgres',                  // Default username for pgAdmin
-  host: 'localhost',                // Local machine (you're not using cloud DB)
-  database: 'postgres',             // You only have 1 DB — it's named "postgres"
-  password: 'St0n3fl0w3r@1994',     // ✅ This is your password
-  port: 5432                        // Default PostgreSQL port
-});
-
-
-// Middleware
 app.use(cors());
 app.use(express.json());
 
-// MX record lookup
-function getMXRecords(domain) {
-  return new Promise((resolve, reject) => {
-    dns.resolveMx(domain, (err, addresses) => {
-      if (err) reject('Error resolving MX records');
-      else resolve(addresses);
-    });
-  });
-}
+// 🔁 PostgreSQL setup using Render credentials
+const pool = new Pool({
+  user: 'your_render_user',         // Replace
+  host: 'your_render_host',         // Replace
+  database: 'your_render_db_name',  // Replace
+  password: 'your_render_password', // Replace
+  port: 5432,
+});
 
-// Main email verifier
-async function verifyEmail(email) {
-  const domain = email.split('@')[1];
+// 🧱 Create table if not exists
+pool.query(`
+  CREATE TABLE IF NOT EXISTS verification_history (
+    id SERIAL PRIMARY KEY,
+    email TEXT NOT NULL,
+    is_valid BOOLEAN,
+    error_message TEXT,
+    verified_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+  );
+`);
 
-  try {
-    const mxRecords = await getMXRecords(domain);
-    if (mxRecords.length === 0) {
-      return { email, isValid: false, errorMessage: 'No MX records found.' };
-    }
-
-    const mailServer = mxRecords[0].exchange;
-    const client = new SMTPClient({ host: mailServer, port: 25, secure: false });
-
-    await client.connect();
-    await client.greet();
-    await client.mail({ from: 'test@example.com' });
-
-    try {
-      const response = await client.rcpt({ to: email });
-      await client.quit();
-
-      if (response.code >= 400 && response.code < 500) {
-        return { email, isValid: false, errorMessage: 'Soft bounce: ' + response.message };
-      }
-      if (response.code >= 500 && response.code < 600) {
-        return { email, isValid: false, errorMessage: 'Hard bounce: ' + response.message };
-      }
-
-      return { email, isValid: true, errorMessage: 'Valid email address.' };
-    } catch (err) {
-      return { email, isValid: false, errorMessage: 'RCPT failed: ' + err.message };
-    }
-
-  } catch (err) {
-    return { email, isValid: false, errorMessage: 'SMTP Error: ' + err.message };
-  }
-}
-
-// Route to handle verification requests
 app.post('/verify-emails', async (req, res) => {
   const emails = req.body.emails;
-  console.log("➡️ Received request to verify:", emails);
 
-  const results = await Promise.all(emails.map(verifyEmail));
-  console.log("✅ Verification results:", results);
+  const results = await Promise.all(emails.map(async (email) => {
+    let isValid = false;
+    let errorMessage = '';
 
-  for (const r of results) {
-    try {
-      await pool.query(
-        'INSERT INTO verification_history (email, is_valid, error_message) VALUES ($1, $2, $3)',
-        [r.email, r.isValid, r.errorMessage]
-      );
-      console.log("📥 Inserted into DB:", r.email);
-    } catch (err) {
-      console.error("❌ DB Insert Error for", r.email, "=>", err.message);
+    // Dummy validation logic (replace with SMTP logic later)
+    if (email.includes('@')) {
+      isValid = true;
+      errorMessage = 'Valid email address';
+    } else {
+      errorMessage = 'Invalid email format';
     }
-  }
+
+    // Save to PostgreSQL
+    await pool.query(
+      `INSERT INTO verification_history (email, is_valid, error_message) VALUES ($1, $2, $3)`,
+      [email, isValid, errorMessage]
+    );
+
+    return { email, isValid, errorMessage };
+  }));
 
   res.json(results);
 });
