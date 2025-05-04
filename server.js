@@ -7,6 +7,7 @@ const { Pool } = require('pg');
 const app = express();
 const port = process.env.PORT || 3000;
 
+// PostgreSQL connection (Render DB)
 const pool = new Pool({
   user: 'email_verification_db_nvnq_user',
   host: 'dpg-d0bhoo95pdvs73cmehlg-a.oregon-postgres.render.com',
@@ -19,6 +20,7 @@ const pool = new Pool({
 app.use(cors());
 app.use(express.json());
 
+// Lookup MX records of the domain
 function getMXRecords(domain) {
   return new Promise((resolve, reject) => {
     dns.resolveMx(domain, (err, addresses) => {
@@ -28,8 +30,20 @@ function getMXRecords(domain) {
   });
 }
 
+// Verify the email using SMTP handshake (except for known blockers like Gmail)
 async function verifyEmail(email) {
-  const domain = email.split('@')[1];
+  const domain = email.split('@')[1].toLowerCase();
+
+  // Known providers that block SMTP verification
+  const blockedProviders = ['gmail.com', 'googlemail.com', 'outlook.com', 'hotmail.com', 'yahoo.com', 'zoho.com'];
+
+  if (blockedProviders.includes(domain)) {
+    return {
+      email,
+      isValid: null,
+      errorMessage: 'Cannot verify: Provider blocks SMTP validation (e.g., Gmail/Outlook)'
+    };
+  }
 
   try {
     const mxRecords = await getMXRecords(domain);
@@ -50,10 +64,10 @@ async function verifyEmail(email) {
         return { email, isValid: false, errorMessage: response.message };
       }
 
-      return { email, isValid: true, errorMessage: 'Valid email' };
+      return { email, isValid: true, errorMessage: 'Valid email address' };
     } catch (err) {
       await client.quit();
-      return { email, isValid: false, errorMessage: 'RCPT failed: ' + err.message };
+      return { email, isValid: false, errorMessage: 'RCPT TO failed: ' + err.message };
     }
 
   } catch (err) {
@@ -61,6 +75,7 @@ async function verifyEmail(email) {
   }
 }
 
+// Main endpoint to verify email(s)
 app.post('/verify-emails', async (req, res) => {
   try {
     const emails = req.body.emails || [];
@@ -69,9 +84,14 @@ app.post('/verify-emails', async (req, res) => {
     const results = await Promise.all(emails.map(verifyEmail));
 
     for (const r of results) {
+      const status =
+        r.isValid === true ? 'Valid'
+        : r.isValid === false ? 'Invalid'
+        : 'Unverifiable';
+
       await pool.query(
         'INSERT INTO verification_history (email, status, error_message, verified_at) VALUES ($1, $2, $3, NOW()) ON CONFLICT (email) DO UPDATE SET status = $2, error_message = $3, verified_at = NOW()',
-        [r.email, r.isValid ? 'Valid' : 'Invalid', r.errorMessage]
+        [r.email, status, r.errorMessage]
       );
     }
 
@@ -82,8 +102,9 @@ app.post('/verify-emails', async (req, res) => {
   }
 });
 
+// Health check endpoint
 app.get('/', (req, res) => {
-  res.send('Email Verifier Backend Running ✅');
+  res.send('✅ Email Verifier Backend Running');
 });
 
 app.listen(port, () => {
